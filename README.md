@@ -34,19 +34,23 @@
     </p>
 </div>
 
-
-
-
-
-
-
 ---
+
 
 > [!IMPORTANT]
 >
 > **v2.0 版本升级注意事项请查看公告！**
 
+原项目：https://github.com/MarSeventh/CloudFlare-ImgBed
 
+新增支持tgbot的Webhook直接保存到telegram渠道
+
+目前仅支持设置一个，在群组中发送图片或图片文件即可自动保存
+```
+curl -X POST https://your-domain.com/api/manage/telegram-bot/webhook -H "Content-Type: application/json" -H "Authorization: <API Token>" -d '{"action":"setWebhook","webhookUrl":"https://your-domain.com/webhook/telegram","secretToken":"<随机字符串>","targetChannel":"<渠道名>"}'
+```
+
+docker hub: `lxsoyo/cloudflare-imgbed`
 
 <details>
     <summary>公告</summary>

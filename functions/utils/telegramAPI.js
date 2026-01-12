@@ -139,4 +139,84 @@ export class TelegramAPI {
         return response;
     }
 
+    /**
+     * 发送文本消息
+     * @param {string} chatId - 聊天ID
+     * @param {string} text - 消息文本
+     * @param {Object} options - 可选参数
+     * @returns {Promise<Object>} API响应结果
+     */
+    async sendMessage(chatId, text, options = {}) {
+        const url = `${this.baseURL}/sendMessage`;
+        const body = {
+            chat_id: chatId,
+            text: text,
+            ...options
+        };
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                ...this.defaultHeaders,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+
+        return await response.json();
+    }
+
+    /**
+     * 设置 Webhook
+     * @param {string} webhookUrl - Webhook URL
+     * @param {string} secretToken - 验证 token
+     * @returns {Promise<Object>} API响应结果
+     */
+    async setWebhook(webhookUrl, secretToken) {
+        const url = `${this.baseURL}/setWebhook`;
+        const body = {
+            url: webhookUrl,
+            secret_token: secretToken
+        };
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                ...this.defaultHeaders,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+
+        return await response.json();
+    }
+
+    /**
+     * 删除 Webhook
+     * @returns {Promise<Object>} API响应结果
+     */
+    async deleteWebhook() {
+        const url = `${this.baseURL}/deleteWebhook`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: this.defaultHeaders
+        });
+
+        return await response.json();
+    }
+
+    /**
+     * 获取 Webhook 信息
+     * @returns {Promise<Object>} API响应结果
+     */
+    async getWebhookInfo() {
+        const url = `${this.baseURL}/getWebhookInfo`;
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: this.defaultHeaders
+        });
+
+        return await response.json();
+    }
+
 }
