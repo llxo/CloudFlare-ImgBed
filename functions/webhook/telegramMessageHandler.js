@@ -33,6 +33,10 @@ export async function handleTelegramMessage(context, update) {
 
     let fileId, fileSize, fileName, fileType;
     const chatId = message.chat.id.toString();
+    
+    // 添加日志，查看 media_group_id
+    console.log('Message media_group_id:', message.media_group_id);
+    console.log('Message type:', message.photo ? 'photo' : (message.document ? 'document' : 'other'));
 
     // 处理照片消息（压缩图片）
     if (message.photo) {
@@ -69,6 +73,17 @@ export async function handleTelegramMessage(context, update) {
         return { success: false, reason: 'webhook_disabled' };
     }
 
+    // 检查图片是否已经保存过（去重）
+    const existingFiles = await db.list({ prefix: '' });
+    for (const key of existingFiles.keys) {
+        const fileData = await db.getWithMetadata(key.name);
+        if (fileData.metadata?.TgFileId === fileId) {
+            console.log(`File already saved: ${key.name}, skipping duplicate`);
+            return { success: false, reason: 'already_saved', existingFileId: key.name };
+        }
+    }
+
+
     // 获取目标渠道配置
     const channel = await getTelegramChannel(db, config.targetChannel);
     if (!channel) {
@@ -98,7 +113,8 @@ export async function handleTelegramMessage(context, update) {
         TimeStamp: Date.now(),
         Label: "None",
         Directory: "",
-        Tags: []
+        Tags: [],
+        MediaGroupId: message.media_group_id || null
     };
 
     // 如果配置了代理域名，保存到 metadata
@@ -121,17 +137,112 @@ export async function handleTelegramMessage(context, update) {
         console.error('Failed to update index:', error);
     }
 
-    // 发送成功回复消息
-    try {
-        const telegramAPI = new TelegramAPI(channel.botToken, channel.proxyUrl || '');
-        await telegramAPI.sendMessage(chatId, `✅ 图片已保存\n文件ID: ${fullId}\n大小: ${metadata.FileSize}MB`);
-    } catch (error) {
-        console.error('Failed to send reply:', error);
+    // 处理批量图片的回复逻辑
+    const mediaGroupId = message.media_group_id;
+    const telegramAPI = new TelegramAPI(channel.botToken, channel.proxyUrl || '');
+    
+    if (mediaGroupId) {
+        // 批量上传模式：接收时用计数器，结束时查数据库
+        const batchKey = `telegram_batch_${mediaGroupId}`;
+        const batchData = await db.get(batchKey);
+        
+        let batchInfo = batchData ? JSON.parse(batchData) : { 
+            count: 0,
+            totalSize: 0,
+            messageId: null,
+            firstFileId: null,
+            lastEditTime: 0
+        };
+        
+        // 快速计数，不查询数据库
+        batchInfo.count++;
+        batchInfo.totalSize += parseFloat(metadata.FileSize);
+        
+        if (!batchInfo.firstFileId) {
+            batchInfo.firstFileId = fullId;
+        }
+        
+        // 节流：只在距离上次编辑超过500ms时才更新消息
+        const now = Date.now();
+        const shouldEdit = (now - batchInfo.lastEditTime) >= 500;
+        
+        try {
+            if (batchInfo.messageId && shouldEdit) {
+                // 编辑已有消息（节流）
+                try {
+                    await telegramAPI.editMessageText(
+                        chatId,
+                        batchInfo.messageId,
+                        `📥 正在接收图片...\n` +
+                        `已保存: ${batchInfo.count} 张\n` +
+                        `总大小: ${batchInfo.totalSize.toFixed(2)}MB`
+                    );
+                    batchInfo.lastEditTime = now;
+                } catch (error) {
+                    // 忽略 "message is not modified" 错误
+                    if (!error.message?.includes('message is not modified')) {
+                        console.error('Failed to edit batch message:', error);
+                    }
+                }
+            } else if (!batchInfo.messageId) {
+                // 发送新消息
+                const response = await telegramAPI.sendMessage(
+                    chatId,
+                    `📥 正在接收图片...\n` +
+                    `已保存: ${batchInfo.count} 张\n` +
+                    `总大小: ${batchInfo.totalSize.toFixed(2)}MB`
+                );
+                if (response.ok) {
+                    batchInfo.messageId = response.result.message_id;
+                    batchInfo.lastEditTime = now;
+                }
+            }
+        } catch (error) {
+            console.error('Failed to update batch message:', error);
+        }
+        
+        // 保存批次信息，设置 60 秒过期时间
+        await db.put(batchKey, JSON.stringify(batchInfo), { 
+            expirationTtl: 60 
+        });
+        
+        // 异步检查批次是否结束（不阻塞当前请求）
+        context.waitUntil((async () => {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            const finalBatchData = await db.get(batchKey);
+            if (!finalBatchData) return;
+            
+            const finalBatchInfo = JSON.parse(finalBatchData);
+            
+            // 直接使用计数器数据（已经很准确了）
+            try {
+                await telegramAPI.editMessageText(
+                    chatId,
+                    finalBatchInfo.messageId,
+                    `✅ 批量保存完成\n` +
+                    `共保存: ${finalBatchInfo.count} 张图片\n` +
+                    `总大小: ${finalBatchInfo.totalSize.toFixed(2)}MB\n` +
+                    `首个文件ID: ${finalBatchInfo.firstFileId}`
+                );
+                await db.delete(batchKey);
+            } catch (error) {
+                console.error('Failed to finalize batch message:', error);
+            }
+        })());
+    } else {
+        // 单张图片：直接回复
+        try {
+            await telegramAPI.sendMessage(chatId, `✅ 图片已保存\n文件ID: ${fullId}\n大小: ${metadata.FileSize}MB`);
+        } catch (error) {
+            console.error('Failed to send reply:', error);
+        }
     }
 
     return {
         success: true,
         fileId: fullId,
-        metadata
+        metadata,
+        mediaGroupId
     };
 }

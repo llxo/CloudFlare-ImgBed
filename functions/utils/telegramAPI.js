@@ -219,4 +219,33 @@ export class TelegramAPI {
         return await response.json();
     }
 
+    /**
+     * 编辑消息
+     * @param {string} chatId - 聊天ID
+     * @param {number} messageId - 消息ID
+     * @param {string} text - 新消息文本
+     * @param {Object} options - 可选参数
+     * @returns {Promise<Object>} API响应结果
+     */
+    async editMessageText(chatId, messageId, text, options = {}) {
+        const url = `${this.baseURL}/editMessageText`;
+        const body = {
+            chat_id: chatId,
+            message_id: messageId,
+            text: text,
+            ...options
+        };
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                ...this.defaultHeaders,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+
+        return await response.json();
+    }
+
 }
