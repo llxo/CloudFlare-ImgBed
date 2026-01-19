@@ -36,21 +36,37 @@
 
 ---
 
+原项目：https://github.com/MarSeventh/CloudFlare-ImgBed
+
+> 新增了一些功能
+
+#### TG渠道快速保存
+支持将tg渠道群组的图片直接保存到该渠道(索引)，支持设置目录 `/dir 目录` 
+
+目前仅支持设置一个，在群组中发送图片或图片文件即可自动保存，下面为初始化命令
+
+```bash
+curl -X POST https://your-domain/api/manage/telegram-bot/webhook \
+  -H "Content-Type: application/json" \
+  -H "Authorization: <API Token>" \
+  -d '{
+    "action": "setWebhook",
+    "webhookUrl": "https://your-domain/webhook/telegram",
+    "secretToken": "<随机字符串>",
+    "targetChannel": "<渠道名>"
+  }'
+```
+#### Masonry视图
+
+在文件管理页新增Masonry视图
+
+#### docker hub
+
+docker hub: `lxsoyo/cloudflare-imgbed`
 
 > [!IMPORTANT]
 >
 > **v2.0 版本升级注意事项请查看公告！**
-
-原项目：https://github.com/MarSeventh/CloudFlare-ImgBed
-
-新增支持tgbot的Webhook直接保存到telegram渠道
-
-目前仅支持设置一个，在群组中发送图片或图片文件即可自动保存
-```
-curl -X POST https://your-domain.com/api/manage/telegram-bot/webhook -H "Content-Type: application/json" -H "Authorization: <API Token>" -d '{"action":"setWebhook","webhookUrl":"https://your-domain.com/webhook/telegram","secretToken":"<随机字符串>","targetChannel":"<渠道名>"}'
-```
-
-docker hub: `lxsoyo/cloudflare-imgbed`
 
 <details>
     <summary>公告</summary>
