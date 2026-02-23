@@ -179,16 +179,16 @@ export async function handleTelegramMessage(context, update, config) {
     if (mediaGroupId) {
         const batchKey = `telegram_batch_${mediaGroupId}`;
         const batchData = await db.get(batchKey);
-        
-        let batchInfo = batchData ? JSON.parse(batchData) : { 
+
+        let batchInfo = batchData ? JSON.parse(batchData) : {
             messageId: null,
             firstFileId: null
         };
-        
+
         if (!batchInfo.firstFileId) {
             batchInfo.firstFileId = fullId;
         }
-        
+
         // 只在第一张图片时发送消息
         if (!batchInfo.messageId) {
             try {
@@ -203,24 +203,31 @@ export async function handleTelegramMessage(context, update, config) {
                 console.error('Failed to send batch message:', error);
             }
         }
-        
-        await db.put(batchKey, JSON.stringify(batchInfo), { 
-            expirationTtl: 60 
+
+        // 每个 handler 写入自己的时间戳，用于去抖：只有最后写入的 handler 才发送最终消息
+        batchInfo.lastUpdated = Date.now();
+        const myTimestamp = batchInfo.lastUpdated;
+
+        await db.put(batchKey, JSON.stringify(batchInfo), {
+            expirationTtl: 60
         });
-        
+
         context.waitUntil((async () => {
             await new Promise(resolve => setTimeout(resolve, 5000));
-            
+
             const finalBatchData = await db.get(batchKey);
             if (!finalBatchData) return;
-            
+
             const finalBatchInfo = JSON.parse(finalBatchData);
+
+            // 去抖：只有最后一个 handler（lastUpdated 匹配）才执行最终编辑
+            if (finalBatchInfo.lastUpdated !== myTimestamp) return;
 
             // 统计最终数量和大小（D1 用 SQL 直接查，KV 用 batch_index 前缀 list）
             const batchStats = await db.countBatchFiles(mediaGroupId);
             const finalCount = batchStats.count;
             const finalTotalSize = batchStats.totalSize;
-            
+
             try {
                 await telegramAPI.editMessageText(
                     chatId,
