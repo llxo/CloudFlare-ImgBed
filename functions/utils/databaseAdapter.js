@@ -70,6 +70,27 @@ class KVAdapter {
         return await this.kv.put(`tg_dedup_${tgFileId}`, fullId);
     }
 
+    // 记录批量上传中的单个文件（用于计数）
+    // KV 使用带 TTL 的 batch_index 记录
+    async saveBatchFile(mediaGroupId, fullId, fileSize) {
+        const batchIndexKey = `batch_index_${mediaGroupId}_${fullId}`;
+        await this.kv.put(batchIndexKey, fullId, {
+            expirationTtl: 3600,
+            metadata: { size: fileSize }
+        });
+    }
+
+    // 统计批量上传的文件数量和总大小
+    // KV 通过 list batch_index 前缀来统计
+    async countBatchFiles(mediaGroupId) {
+        const batchFiles = await this.kv.list({ prefix: `batch_index_${mediaGroupId}_` });
+        let totalSize = 0;
+        for (const key of batchFiles.keys) {
+            totalSize += parseFloat(key.metadata?.size || 0);
+        }
+        return { count: batchFiles.keys.length, totalSize };
+    }
+
     // 为了兼容性，添加一些别名方法
     async putFile(fileId, value, options) {
         return await this.put(fileId, value, options);

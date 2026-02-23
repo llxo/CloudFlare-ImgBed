@@ -157,13 +157,9 @@ export async function handleTelegramMessage(context, update, config) {
         // 写入去重索引（KV 写反向索引，D1 无需额外操作）
         await db.saveTgDedup(fileId, fullId);
 
-        // 如果是批量上传，创建索引便于统计
+        // 如果是批量上传，记录用于统计（KV 写 batch_index，D1 无需额外操作）
         if (mediaGroupId) {
-            const batchIndexKey = `batch_index_${mediaGroupId}_${fullId}`;
-            await db.put(batchIndexKey, fullId, { 
-                expirationTtl: 3600,
-                metadata: { size: metadata.FileSize }
-            });
+            await db.saveBatchFile(mediaGroupId, fullId, metadata.FileSize);
         }
     } catch (error) {
         console.error('Failed to write to database:', error);
@@ -219,14 +215,11 @@ export async function handleTelegramMessage(context, update, config) {
             if (!finalBatchData) return;
             
             const finalBatchInfo = JSON.parse(finalBatchData);
-            
-            // 查询最终准确数量
-            const finalBatchFiles = await db.list({ prefix: `batch_index_${mediaGroupId}_` });
-            const finalCount = finalBatchFiles.keys.length;
-            let finalTotalSize = 0;
-            for (const key of finalBatchFiles.keys) {
-                finalTotalSize += parseFloat(key.metadata?.size || 0);
-            }
+
+            // 统计最终数量和大小（D1 用 SQL 直接查，KV 用 batch_index 前缀 list）
+            const batchStats = await db.countBatchFiles(mediaGroupId);
+            const finalCount = batchStats.count;
+            const finalTotalSize = batchStats.totalSize;
             
             try {
                 await telegramAPI.editMessageText(

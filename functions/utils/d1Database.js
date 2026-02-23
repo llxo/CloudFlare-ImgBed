@@ -332,6 +332,31 @@ D1Database.prototype.saveTgDedup = function(tgFileId, fullId) {
 };
 
 /**
+ * 记录批量上传中的单个文件（用于计数）
+ * D1 不需要额外记录，putFile 已将 MediaGroupId 写入 metadata
+ */
+D1Database.prototype.saveBatchFile = function(mediaGroupId, fullId, fileSize) {
+    return Promise.resolve();
+};
+
+/**
+ * 统计批量上传的文件数量和总大小
+ * D1 直接通过 SQL 从 files 表查询，无需额外索引记录
+ */
+D1Database.prototype.countBatchFiles = function(mediaGroupId) {
+    var stmt = this.db.prepare(
+        "SELECT COUNT(*) as count, COALESCE(SUM(CAST(file_size AS REAL)), 0) as total_size " +
+        "FROM files WHERE json_extract(metadata, '$.MediaGroupId') = ?"
+    );
+    return stmt.bind(mediaGroupId).first().then(function(result) {
+        return {
+            count: result ? result.count : 0,
+            totalSize: result ? result.total_size : 0
+        };
+    });
+};
+
+/**
  * 通用的put方法，根据key类型自动选择存储位置
  */
 D1Database.prototype.put = function(key, value, options) {
