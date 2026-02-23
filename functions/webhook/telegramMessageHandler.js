@@ -94,6 +94,13 @@ export async function handleTelegramMessage(context, update, config) {
         return { success: false, reason: 'webhook_disabled' };
     }
 
+    // 提前获取渠道配置和 TelegramAPI（去重回复和后续上传都需要）
+    const channel = await getTelegramChannel(db, config.targetChannel);
+    if (!channel) {
+        return { success: false, reason: 'channel_not_found' };
+    }
+    const telegramAPI = new TelegramAPI(channel.botToken, channel.proxyUrl || '');
+
     // 检查图片是否已经保存过（反向索引去重，O(1) 读取）
     const existingFileId = await db.findByTgFileId(fileId);
     if (existingFileId) {
@@ -103,12 +110,6 @@ export async function handleTelegramMessage(context, update, config) {
 
     // 获取用户设置的上传目录
     const uploadDir = await db.get(`telegram_upload_dir_${chatId}`) || '';
-
-    // 获取目标渠道配置
-    const channel = await getTelegramChannel(db, config.targetChannel);
-    if (!channel) {
-        return { success: false, reason: 'channel_not_found' };
-    }
 
     // 构建 context 用于生成唯一文件 ID
     const requestUrl = new URL(context.request.url);
@@ -173,9 +174,7 @@ export async function handleTelegramMessage(context, update, config) {
         console.error('Failed to update index:', error);
     }
 
-    // 处理批量图片的回复逻辑
-    const telegramAPI = new TelegramAPI(channel.botToken, channel.proxyUrl || '');
-    
+    // 处理回复逻辑（telegramAPI 已在上方初始化）
     if (mediaGroupId) {
         const batchKey = `telegram_batch_${mediaGroupId}`;
         const batchData = await db.get(batchKey);
@@ -204,42 +203,54 @@ export async function handleTelegramMessage(context, update, config) {
             }
         }
 
-        // 每个 handler 写入自己的时间戳，用于去抖：只有最后写入的 handler 才发送最终消息
+        // 每个 handler 写入自己的时间戳，用于去抖
         batchInfo.lastUpdated = Date.now();
         const myTimestamp = batchInfo.lastUpdated;
 
         await db.put(batchKey, JSON.stringify(batchInfo), {
-            expirationTtl: 60
+            expirationTtl: 120
         });
 
         context.waitUntil((async () => {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-
-            const finalBatchData = await db.get(batchKey);
-            if (!finalBatchData) return;
-
-            const finalBatchInfo = JSON.parse(finalBatchData);
-
-            // 去抖：只有最后一个 handler（lastUpdated 匹配）才执行最终编辑
-            if (finalBatchInfo.lastUpdated !== myTimestamp) return;
-
-            // 统计最终数量和大小（D1 用 SQL 直接查，KV 用 batch_index 前缀 list）
-            const batchStats = await db.countBatchFiles(mediaGroupId);
-            const finalCount = batchStats.count;
-            const finalTotalSize = batchStats.totalSize;
-
             try {
-                await telegramAPI.editMessageText(
-                    chatId,
-                    finalBatchInfo.messageId,
-                    `✅ 批量保存完成\n` +
-                    `共保存: ${finalCount} 张图片\n` +
-                    `总大小: ${finalTotalSize.toFixed(2)}MB\n` +
-                    `首个文件ID: ${finalBatchInfo.firstFileId}`
-                );
-                await db.delete(batchKey);
+                // Phase 1: 初始等待
+                await new Promise(resolve => setTimeout(resolve, 5000));
+
+                let data = await db.get(batchKey);
+                if (!data) return;
+                let info = JSON.parse(data);
+                // 不是最后一个 handler → 立即退出，不做任何 DB 操作
+                if (info.lastUpdated !== myTimestamp) return;
+
+                // Phase 2: 二次确认，等待可能的大图/慢图到达
+                await new Promise(resolve => setTimeout(resolve, 5000));
+
+                data = await db.get(batchKey);
+                if (!data) return;
+                info = JSON.parse(data);
+                // 新的 handler 出现了 → 让它来处理
+                if (info.lastUpdated !== myTimestamp) return;
+
+                // 确认是最后一个 handler，统计并发送最终消息
+                const batchStats = await db.countBatchFiles(mediaGroupId);
+
+                if (info.messageId) {
+                    await telegramAPI.editMessageText(
+                        chatId,
+                        info.messageId,
+                        `✅ 批量保存完成\n` +
+                        `共保存: ${batchStats.count} 张图片\n` +
+                        `总大小: ${batchStats.totalSize.toFixed(2)}MB\n` +
+                        `首个文件ID: ${info.firstFileId}`
+                    );
+                }
+
+                // 清理 batchKey
+                try { await db.delete(batchKey); } catch (e) { /* ignore */ }
             } catch (error) {
-                console.error('Failed to finalize batch message:', error);
+                console.error('Batch waitUntil error:', error);
+                // 出错也要尝试清理，避免残留记录影响后续
+                try { await db.delete(batchKey); } catch (e) { /* ignore */ }
             }
         })());
     } else {
