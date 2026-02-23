@@ -313,6 +313,25 @@ D1Database.prototype.extractMetadataFields = function(metadata) {
 // ==================== 通用方法 ====================
 
 /**
+ * 通过 Telegram FileId 查找已有文件（去重用）
+ * 直接查询 tg_file_id 索引列，O(1)
+ */
+D1Database.prototype.findByTgFileId = function(tgFileId) {
+    var stmt = this.db.prepare('SELECT id FROM files WHERE tg_file_id = ? LIMIT 1');
+    return stmt.bind(tgFileId).first().then(function(result) {
+        return result ? result.id : null;
+    });
+};
+
+/**
+ * 保存 Telegram 去重索引
+ * D1 已在 putFile 时将 tg_file_id 写入索引列，无需额外操作
+ */
+D1Database.prototype.saveTgDedup = function(tgFileId, fullId) {
+    return Promise.resolve();
+};
+
+/**
  * 通用的put方法，根据key类型自动选择存储位置
  */
 D1Database.prototype.put = function(key, value, options) {

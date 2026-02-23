@@ -23,7 +23,7 @@ async function getTelegramChannel(db, channelName) {
  * @param {Object} update - Telegram Update 对象
  * @returns {Promise<Object>} 处理结果
  */
-export async function handleTelegramMessage(context, update) {
+export async function handleTelegramMessage(context, update, config) {
     const { env } = context;
 
     const message = update.message;
@@ -33,18 +33,13 @@ export async function handleTelegramMessage(context, update) {
 
     const chatId = message.chat.id.toString();
     const db = getDatabase(env);
-    
+
     // 处理命令
     if (message.text && message.text.startsWith('/')) {
         const parts = message.text.trim().split(/\s+/);
         const command = parts[0].toLowerCase();
-        
+
         if (command === '/dir') {
-            const webhookConfig = await db.get('manage@sysConfig@telegram@webhook');
-            if (!webhookConfig) {
-                return { success: false, reason: 'webhook_not_configured' };
-            }
-            const config = JSON.parse(webhookConfig);
             const channel = await getTelegramChannel(db, config.targetChannel);
             if (!channel) {
                 return { success: false, reason: 'channel_not_found' };
@@ -94,26 +89,16 @@ export async function handleTelegramMessage(context, update) {
         return { success: false, reason: 'not_image' };
     }
 
-    // 获取系统配置
-    const webhookConfig = await db.get('manage@sysConfig@telegram@webhook');
-
-    if (!webhookConfig) {
-        return { success: false, reason: 'webhook_not_configured' };
-    }
-
-    const config = JSON.parse(webhookConfig);
+    // 使用传入的 config（由 telegram.js 已读取并解析）
     if (!config.enabled || !config.targetChannel) {
         return { success: false, reason: 'webhook_disabled' };
     }
 
-    // 检查图片是否已经保存过（去重）
-    const existingFiles = await db.list({ prefix: '' });
-    for (const key of existingFiles.keys) {
-        const fileData = await db.getWithMetadata(key.name);
-        if (fileData.metadata?.TgFileId === fileId) {
-            console.log(`File already saved: ${key.name}, skipping duplicate`);
-            return { success: false, reason: 'already_saved', existingFileId: key.name };
-        }
+    // 检查图片是否已经保存过（反向索引去重，O(1) 读取）
+    const existingFileId = await db.findByTgFileId(fileId);
+    if (existingFileId) {
+        console.log(`File already saved: ${existingFileId}, skipping duplicate`);
+        return { success: false, reason: 'already_saved', existingFileId };
     }
 
     // 获取用户设置的上传目录
@@ -168,7 +153,10 @@ export async function handleTelegramMessage(context, update) {
     // 写入数据库
     try {
         await db.put(fullId, "", { metadata });
-        
+
+        // 写入去重索引（KV 写反向索引，D1 无需额外操作）
+        await db.saveTgDedup(fileId, fullId);
+
         // 如果是批量上传，创建索引便于统计
         if (mediaGroupId) {
             const batchIndexKey = `batch_index_${mediaGroupId}_${fullId}`;
@@ -237,8 +225,7 @@ export async function handleTelegramMessage(context, update) {
             const finalCount = finalBatchFiles.keys.length;
             let finalTotalSize = 0;
             for (const key of finalBatchFiles.keys) {
-                const fileData = await db.getWithMetadata(key.name);
-                finalTotalSize += parseFloat(fileData.metadata?.size || 0);
+                finalTotalSize += parseFloat(key.metadata?.size || 0);
             }
             
             try {

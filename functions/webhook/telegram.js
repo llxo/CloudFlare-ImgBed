@@ -39,8 +39,8 @@ export async function onRequest(context) {
         // 解析 Update 对象
         const update = await request.json();
 
-        // 处理消息
-        const result = await handleTelegramMessage(context, update);
+        // 处理消息（传入已解析的 config，避免 handler 重复读取）
+        const result = await handleTelegramMessage(context, update, config);
 
         if (result.success) {
             return new Response(JSON.stringify({

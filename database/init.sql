@@ -80,6 +80,7 @@ CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
 CREATE INDEX IF NOT EXISTS idx_files_upload_ip ON files(upload_ip);
 CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_files_tags ON files(tags);
+CREATE INDEX IF NOT EXISTS idx_files_tg_file_id ON files(tg_file_id);
 
 CREATE INDEX IF NOT EXISTS idx_settings_category ON settings(category);
 
