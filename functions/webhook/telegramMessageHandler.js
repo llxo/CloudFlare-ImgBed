@@ -1,6 +1,6 @@
 import { buildUniqueFileId, endUpload } from '../upload/uploadTools.js';
 import { getDatabase } from '../utils/databaseAdapter.js';
-import { TelegramAPI } from '../utils/telegramAPI.js';
+import { TelegramAPI } from '../utils/storage/telegramAPI.js';
 
 /**
  * 获取 Telegram 渠道配置
