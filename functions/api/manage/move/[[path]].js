@@ -2,18 +2,18 @@ import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/clien
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { moveFileInIndex, batchMoveFilesInIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from '../../../utils/databaseAdapter.js';
+import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
+import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
+import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
 
 export async function onRequest(context) {
     const { request, env, params, waitUntil } = context;
 
     const url = new URL(request.url);
 
-    // 读取目标文件夹
-    const dist = url.searchParams.get('dist')
-        ? url.searchParams.get('dist').replace(/^\/+/, '')
-            .replace(/\/{2,}/g, '/')
-            .replace(/\/$/, '')
-        : '';
+    // 读取目标文件夹，并进行路径安全处理
+    const rawDist = url.searchParams.get('dist') || '';
+    const dist = sanitizeUploadFolder(rawDist);
 
     // 读取folder参数，判断是否为文件夹移动请求
     const folder = url.searchParams.get('folder');
@@ -36,7 +36,7 @@ export async function onRequest(context) {
                 // 获取指定目录下的所有文件
                 const listUrl = new URL(`${url.origin}/api/manage/list?count=-1&dir=${currentFolder.path}`);
                 const listRequest = new Request(listUrl, {
-                    headers: request.headers
+                    headers: request.headers,
                 });
                 const listResponse = await fetch(listRequest);
                 const listData = await listResponse.json();
@@ -163,6 +163,23 @@ async function moveFile(env, fileId, newFileId, cdnUrl, url) {
             }
         }
 
+        // WebDAV 渠道的图片，需要移动 WebDAV 中对应的文件
+        if (img.metadata?.Channel === 'WebDAV') {
+            const { success, error, webdavConfig } = await moveWebDAVFile(env, img, newFileId);
+            if (!success) {
+                throw new Error(error || 'WebDAV Move Failed');
+            }
+            img.metadata.WebDAVFilePath = newFileId;
+            if (img.metadata.WebDAVPublicBaseUrl || img.metadata.WebDAVPublicUrl || webdavConfig?.publicUrl) {
+                const webdavAPI = new WebDAVAPI(webdavConfig || { baseUrl: img.metadata.WebDAVBaseUrl });
+                const publicBaseUrl = img.metadata.WebDAVPublicBaseUrl
+                    || webdavConfig?.publicUrl
+                    || img.metadata.WebDAVPublicUrl.slice(0, img.metadata.WebDAVPublicUrl.length - fileId.split('/').map(encodeURIComponent).join('/').length);
+                img.metadata.WebDAVPublicBaseUrl = publicBaseUrl;
+                img.metadata.WebDAVPublicUrl = webdavAPI.buildPublicUrl(newFileId, publicBaseUrl);
+            }
+        }
+
         // 旧版 Telegram 渠道和 Telegraph 渠道不支持移动
         if (img.metadata?.Channel === 'Telegram' || img.metadata?.Channel === undefined) {
             throw new Error('Unsupported Channel');
@@ -226,6 +243,29 @@ async function moveS3File(img, newFileId) {
         return { success: true, newKey };
     } catch (error) {
         console.error("S3 Move Failed:", error);
+        return { success: false, error: error.message };
+    }
+}
+
+// 移动 WebDAV 渠道的图片
+async function moveWebDAVFile(env, img, newFileId) {
+    const oldPath = img.metadata?.WebDAVFilePath;
+
+    if (!oldPath) {
+        return { success: false, error: 'WebDAV file missing required metadata for move' };
+    }
+
+    try {
+        const webdavConfig = await resolveWebDAVConfig(env, img.metadata);
+        if (!webdavConfig) {
+            return { success: false, error: 'WebDAV channel config not found for move' };
+        }
+
+        const webdavAPI = new WebDAVAPI(webdavConfig);
+        await webdavAPI.moveFile(oldPath, newFileId, true);
+        return { success: true, newKey: newFileId, webdavConfig };
+    } catch (error) {
+        console.error("WebDAV Move Failed:", error);
         return { success: false, error: error.message };
     }
 }

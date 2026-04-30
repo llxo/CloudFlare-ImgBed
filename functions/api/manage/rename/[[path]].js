@@ -2,6 +2,9 @@ import { S3Client, CopyObjectCommand, DeleteObjectCommand } from "@aws-sdk/clien
 import { purgeCFCache, purgeRandomFileListCache, purgePublicFileListCache } from "../../../utils/purgeCache";
 import { moveFileInIndex } from "../../../utils/indexManager.js";
 import { getDatabase } from '../../../utils/databaseAdapter.js';
+import { sanitizeUploadFolder } from "../../../upload/uploadTools.js";
+import { WebDAVAPI } from "../../../utils/storage/webdavAPI.js";
+import { resolveWebDAVConfig } from "../../../utils/webdavConfig.js";
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -72,7 +75,9 @@ export async function onRequest(context) {
             });
         }
 
-        const newFileId = body.newFileId;
+        // 路径安全处理
+        const newFileId = sanitizeUploadFolder(body.newFileId.trim());
+
         const url = new URL(request.url);
         const db = getDatabase(env);
 
@@ -132,6 +137,23 @@ export async function onRequest(context) {
                 metadata.S3Location = `https://${metadata.S3BucketName}.${s3ServerDomain}/${newKey}`;
             } else {
                 // do nothing
+            }
+        }
+
+        // WebDAV 渠道的图片，需要移动 WebDAV 中对应的文件
+        if (metadata?.Channel === 'WebDAV') {
+            const { success, error, webdavConfig } = await moveWebDAVFile(env, fileData, newFileId);
+            if (!success) {
+                throw new Error(error || 'WebDAV Move Failed');
+            }
+            metadata.WebDAVFilePath = newFileId;
+            if (metadata.WebDAVPublicBaseUrl || metadata.WebDAVPublicUrl || webdavConfig?.publicUrl) {
+                const webdavAPI = new WebDAVAPI(webdavConfig || { baseUrl: metadata.WebDAVBaseUrl });
+                const publicBaseUrl = metadata.WebDAVPublicBaseUrl
+                    || webdavConfig?.publicUrl
+                    || metadata.WebDAVPublicUrl.slice(0, metadata.WebDAVPublicUrl.length - fileId.split('/').map(encodeURIComponent).join('/').length);
+                metadata.WebDAVPublicBaseUrl = publicBaseUrl;
+                metadata.WebDAVPublicUrl = webdavAPI.buildPublicUrl(newFileId, publicBaseUrl);
             }
         }
 
@@ -222,6 +244,29 @@ async function moveS3File(img, newFileId) {
         return { success: true, newKey };
     } catch (error) {
         console.error("S3 Move Failed:", error);
+        return { success: false, error: error.message };
+    }
+}
+
+// 移动 WebDAV 渠道的图片
+async function moveWebDAVFile(env, img, newFileId) {
+    const oldPath = img.metadata?.WebDAVFilePath;
+
+    if (!oldPath) {
+        return { success: false, error: 'WebDAV file missing required metadata for move' };
+    }
+
+    try {
+        const webdavConfig = await resolveWebDAVConfig(env, img.metadata);
+        if (!webdavConfig) {
+            return { success: false, error: 'WebDAV channel config not found for move' };
+        }
+
+        const webdavAPI = new WebDAVAPI(webdavConfig);
+        await webdavAPI.moveFile(oldPath, newFileId, true);
+        return { success: true, newKey: newFileId, webdavConfig };
+    } catch (error) {
+        console.error("WebDAV Move Failed:", error);
         return { success: false, error: error.message };
     }
 }
