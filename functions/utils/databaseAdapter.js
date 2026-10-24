@@ -59,6 +59,36 @@ class KVAdapter {
         return await this.kv.list(options);
     }
 
+    // 通过 Telegram FileUniqueId 或 FileId 查找已有文件（去重用）
+    async findByTgFile(fileUniqueId, fileId) {
+        if (fileUniqueId) {
+            const byUnique = await this.kv.get(`tg_dedup_u_${fileUniqueId}`);
+            if (byUnique) return byUnique;
+        }
+        if (fileId) {
+            const byId = await this.kv.get(`tg_dedup_${fileId}`);
+            if (byId) return byId;
+        }
+        return null;
+    }
+
+    // 兼容旧调用名
+    async findByTgFileId(tgFileId) {
+        return await this.findByTgFile(null, tgFileId);
+    }
+
+    // 保存 Telegram 去重反向索引（同时记录 UniqueId 与 FileId）
+    async saveTgDedup(fileUniqueId, fileId, fullId) {
+        const promises = [];
+        if (fileUniqueId) {
+            promises.push(this.kv.put(`tg_dedup_u_${fileUniqueId}`, fullId));
+        }
+        if (fileId) {
+            promises.push(this.kv.put(`tg_dedup_${fileId}`, fullId));
+        }
+        await Promise.all(promises);
+    }
+
     // 为了兼容性，添加一些别名方法
     async putFile(fileId, value, options) {
         return await this.put(fileId, value, options);

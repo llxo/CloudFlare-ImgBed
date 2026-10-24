@@ -304,8 +304,8 @@ D1Database.prototype.extractMetadataFields = function(metadata) {
         channel: metadata.Channel || null,
         channelName: metadata.ChannelName || null,
         tgFileId: metadata.TgFileId || null,
-        tgChatId: null,
-        tgBotToken: null,
+        tgChatId: metadata.TgChatId || null,
+        tgBotToken: metadata.TgBotToken || null,
         isChunked: metadata.IsChunked || false
     };
 };
@@ -313,12 +313,78 @@ D1Database.prototype.extractMetadataFields = function(metadata) {
 // ==================== 通用方法 ====================
 
 /**
+ * 操作 other_data 表（用于存放 Telegram 临时状态、用户上传目录配置、防抖批次等，避免污染 files 表）
+ */
+D1Database.prototype.putOtherData = function(key, value, type) {
+    var query = 'INSERT OR REPLACE INTO other_data (key, value, type, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)';
+    var stmt = this.db.prepare(query);
+    return stmt.bind(key, typeof value === 'object' ? JSON.stringify(value) : String(value), type || 'telegram').run();
+};
+
+D1Database.prototype.getOtherData = function(key) {
+    var query = 'SELECT value FROM other_data WHERE key = ?';
+    var stmt = this.db.prepare(query);
+    return stmt.bind(key).first().then(function(result) {
+        return result ? result.value : null;
+    });
+};
+
+D1Database.prototype.deleteOtherData = function(key) {
+    var query = 'DELETE FROM other_data WHERE key = ?';
+    var stmt = this.db.prepare(query);
+    return stmt.bind(key).run();
+};
+
+/**
+ * 通过 Telegram FileUniqueId 或 FileId 查找已有文件（去重用）
+ * 彻底废弃对 files 表的未索引字段查询，100% 走 other_data 主键点查（PRIMARY KEY），绝对不发生全表扫描
+ */
+D1Database.prototype.findByTgFile = function(fileUniqueId, fileId) {
+    var self = this;
+    if (fileUniqueId) {
+        return this.getOtherData('tg_dedup_' + fileUniqueId).then(function(res) {
+            if (res) return res;
+            if (fileId) {
+                return self.getOtherData('tg_dedup_' + fileId);
+            }
+            return null;
+        });
+    } else if (fileId) {
+        return this.getOtherData('tg_dedup_' + fileId);
+    }
+    return Promise.resolve(null);
+};
+
+// 兼容旧方法名
+D1Database.prototype.findByTgFileId = function(tgFileId) {
+    return this.findByTgFile(null, tgFileId);
+};
+
+/**
+ * 保存 Telegram 去重索引
+ * 在 other_data 写入主键映射，实现 O(1) 绝对主键点查
+ */
+D1Database.prototype.saveTgDedup = function(fileUniqueId, fileId, fullId) {
+    var promises = [];
+    if (fileUniqueId) {
+        promises.push(this.putOtherData('tg_dedup_' + fileUniqueId, fullId, 'dedup'));
+    }
+    if (fileId) {
+        promises.push(this.putOtherData('tg_dedup_' + fileId, fullId, 'dedup'));
+    }
+    return Promise.all(promises);
+};
+
+/**
  * 通用的put方法，根据key类型自动选择存储位置
  */
 D1Database.prototype.put = function(key, value, options) {
     options = options || {};
 
-    if (key.startsWith('manage@index@operation_')) {
+    if (key.startsWith('tg_') || key.startsWith('telegram_')) {
+        // Telegram 临时状态、批次聚合与目录配置，安全存入 other_data 表，绝对不污染 files 表
+        return this.putOtherData(key, value, 'telegram');
+    } else if (key.startsWith('manage@index@operation_')) {
         var operationId = key.replace('manage@index@operation_', '');
         var operation = JSON.parse(value);
         return this.putIndexOperation(operationId, operation);
@@ -337,7 +403,9 @@ D1Database.prototype.put = function(key, value, options) {
 D1Database.prototype.get = function(key) {
     var self = this;
 
-    if (key.startsWith('manage@index@operation_')) {
+    if (key.startsWith('tg_') || key.startsWith('telegram_')) {
+        return this.getOtherData(key);
+    } else if (key.startsWith('manage@index@operation_')) {
         var operationId = key.replace('manage@index@operation_', '');
         return this.getIndexOperation(operationId).then(function(operation) {
             return operation ? JSON.stringify(operation) : null;
@@ -370,7 +438,9 @@ D1Database.prototype.getWithMetadata = function(key) {
  * 通用的delete方法
  */
 D1Database.prototype.delete = function(key) {
-    if (key.startsWith('manage@index@operation_')) {
+    if (key.startsWith('tg_') || key.startsWith('telegram_')) {
+        return this.deleteOtherData(key);
+    } else if (key.startsWith('manage@index@operation_')) {
         var operationId = key.replace('manage@index@operation_', '');
         return this.deleteIndexOperation(operationId);
     } else if (key.startsWith('manage@')) {
