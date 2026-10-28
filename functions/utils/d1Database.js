@@ -376,6 +376,21 @@ D1Database.prototype.saveTgDedup = function(fileUniqueId, fileId, fullId) {
 };
 
 /**
+ * 删除 Telegram 去重索引
+ */
+D1Database.prototype.deleteTgDedup = function(fileUniqueId, fileId) {
+    var promises = [];
+    if (fileUniqueId) {
+        promises.push(this.deleteOtherData('tg_dedup_' + fileUniqueId));
+        promises.push(this.deleteOtherData('tg_dedup_u_' + fileUniqueId));
+    }
+    if (fileId) {
+        promises.push(this.deleteOtherData('tg_dedup_' + fileId));
+    }
+    return Promise.all(promises);
+};
+
+/**
  * 通用的put方法，根据key类型自动选择存储位置
  */
 D1Database.prototype.put = function(key, value, options) {

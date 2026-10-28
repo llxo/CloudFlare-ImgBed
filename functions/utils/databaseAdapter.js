@@ -89,6 +89,19 @@ class KVAdapter {
         await Promise.all(promises);
     }
 
+    // 删除 Telegram 去重反向索引
+    async deleteTgDedup(fileUniqueId, fileId) {
+        const promises = [];
+        if (fileUniqueId) {
+            promises.push(this.kv.delete(`tg_dedup_u_${fileUniqueId}`));
+            promises.push(this.kv.delete(`tg_dedup_${fileUniqueId}`));
+        }
+        if (fileId) {
+            promises.push(this.kv.delete(`tg_dedup_${fileId}`));
+        }
+        await Promise.all(promises);
+    }
+
     // 为了兼容性，添加一些别名方法
     async putFile(fileId, value, options) {
         return await this.put(fileId, value, options);

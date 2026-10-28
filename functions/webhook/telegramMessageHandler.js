@@ -1,6 +1,6 @@
 import { getDatabase } from '../utils/databaseAdapter.js';
 import { TelegramAPI } from '../utils/storage/telegramAPI.js';
-import { addFileToIndex } from '../utils/indexManager.js';
+import { addFileToIndex, removeFileFromIndex } from '../utils/indexManager.js';
 
 /**
  * 快速解析二进制头部图片的真实尺寸（专用于 Document 原图，零外部依赖）
@@ -159,7 +159,85 @@ export async function handleTelegramMessage(context, update, config) {
     const chatId = message.chat.id.toString();
     const db = getDatabase(env);
 
-    // ==================== 2. 指令交互 (/dir, /help, /start) ====================
+    // ==================== 2. 引用回复快捷删除（对原图/通知回复“删”或“/del”） ====================
+    if (message.reply_to_message && message.text) {
+        const text = message.text.trim().toLowerCase();
+        const deleteTriggers = ['删', '删除', 'del', 'delete', 'rm', '/del', '/delete', '/rm'];
+        if (deleteTriggers.includes(text)) {
+            const channel = await getFastTelegramChannel(db, config.targetChannel);
+            if (!channel) return { success: false, reason: 'channel_not_found' };
+            const telegramAPI = new TelegramAPI(channel.botToken, channel.proxyUrl || '');
+
+            const replied = message.reply_to_message;
+            let targetTgFileId = null;
+            let targetTgFileUniqueId = null;
+            let targetFileId = null;
+
+            // 1. 如果被回复的是照片
+            if (replied.photo && Array.isArray(replied.photo) && replied.photo.length > 0) {
+                const largest = replied.photo[replied.photo.length - 1];
+                targetTgFileId = largest.file_id;
+                targetTgFileUniqueId = largest.file_unique_id;
+            }
+            // 2. 如果被回复的是文档原图
+            else if (replied.document) {
+                targetTgFileId = replied.document.file_id;
+                targetTgFileUniqueId = replied.document.file_unique_id;
+            }
+
+            // 从 Telegram 去重索引中快速定位存储的 fullId
+            if (targetTgFileUniqueId || targetTgFileId) {
+                targetFileId = await db.findByTgFile(targetTgFileUniqueId, targetTgFileId);
+            }
+
+            // 3. 如果被回复的是 Bot 的通知文本，尝试提取其中的 <code>...</code> 文件ID
+            if (!targetFileId && replied.text) {
+                const codeMatch = replied.text.match(/<code>([^<]+)<\/code>/);
+                if (codeMatch && codeMatch[1]) {
+                    const candidate = codeMatch[1].trim();
+                    const existing = await db.get(candidate);
+                    if (existing) {
+                        targetFileId = candidate;
+                    }
+                }
+            }
+
+            if (!targetFileId) {
+                await telegramAPI.sendMessage(
+                    chatId,
+                    `⚠️ <b>未找到对应的图片记录</b>\n可能该图片未成功入库，或已经被删除。`,
+                    { parse_mode: 'HTML', reply_to_message_id: message.message_id }
+                );
+                return { success: false, reason: 'target_not_found' };
+            }
+
+            // 获取原数据以便精确清理去重表
+            const record = await db.getWithMetadata(targetFileId);
+            const metadata = record?.metadata || {};
+            const cleanUniqueId = metadata.TgFileUniqueId || targetTgFileUniqueId;
+            const cleanFileId = metadata.TgFileId || targetTgFileId;
+
+            // 并行执行：主记录删除 + 去重索引清理 + 前端全局索引移除
+            await Promise.all([
+                db.delete(targetFileId),
+                db.deleteTgDedup ? db.deleteTgDedup(cleanUniqueId, cleanFileId) : Promise.resolve(),
+                removeFileFromIndex(context, targetFileId)
+            ]);
+
+            const fileNameDisplay = metadata.FileName ? `\n📄 <b>文件名</b>: <code>${metadata.FileName}</code>` : '';
+            await telegramAPI.sendMessage(
+                chatId,
+                `🗑️ <b>图片已成功从图库中移除</b>\n\n` +
+                `🔗 <b>文件ID</b>: <code>${targetFileId}</code>` +
+                fileNameDisplay,
+                { parse_mode: 'HTML', reply_to_message_id: message.message_id }
+            );
+
+            return { success: true, reason: 'file_deleted', fileId: targetFileId };
+        }
+    }
+
+    // ==================== 3. 指令交互 (/dir, /help, /start) ====================
     if (message.text && message.text.startsWith('/')) {
         const parts = message.text.trim().split(/\s+/);
         const command = parts[0].toLowerCase();
@@ -201,7 +279,8 @@ export async function handleTelegramMessage(context, update, config) {
                 `🤖 <b>Cloudflare-ImgBed 图床机器人已就绪</b>\n\n` +
                 `📌 <b>使用说明</b>：\n` +
                 `• 直接发送图片或原图文档，将自动秒级保存。\n` +
-                `• 相同图片基于永久全局唯一指纹自动去重。\n\n` +
+                `• 相同图片基于永久全局唯一指纹自动去重。\n` +
+                `• 引用回复任意图片发送“删”，即可快速从图库移除。\n\n` +
                 `📁 <b>当前存储目录</b>: <code>${currentDir ? '/' + currentDir + '/' : '/'}</code>\n` +
                 `• 切换目录: <code>/dir 目录名</code>\n` +
                 `• 重置目录: <code>/dir /</code>`,
