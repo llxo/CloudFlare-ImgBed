@@ -140,6 +140,62 @@ export class TelegramAPI {
     }
 
     /**
+     * 获取文件头部二进制数据（用于极速解析原图/文档图片的宽高尺寸，避免全量下载大文件）
+     * @param {string} fileId - Telegram 文件 ID
+     * @param {number} bytes - 需要获取的最大头部字节数（默认 64KB）
+     * @returns {Promise<ArrayBuffer|null>} 文件头部 ArrayBuffer 或 null
+     */
+    async getFileHeader(fileId, bytes = 65536) {
+        try {
+            const filePath = await this.getFilePath(fileId);
+            if (!filePath) return null;
+
+            const fullURL = `${this.fileDomain}/file/bot${this.botToken}/${filePath}`;
+            const response = await fetch(fullURL, {
+                headers: {
+                    ...this.defaultHeaders,
+                    Range: `bytes=0-${bytes - 1}`
+                }
+            });
+
+            if (!response.ok && response.status !== 206) {
+                return null;
+            }
+
+            if (!response.body) {
+                const buf = await response.arrayBuffer();
+                return buf.slice(0, bytes);
+            }
+
+            const reader = response.body.getReader();
+            const chunks = [];
+            let totalRead = 0;
+
+            while (totalRead < bytes) {
+                const { done, value } = await reader.read();
+                if (done || !value) break;
+                chunks.push(value);
+                totalRead += value.length;
+            }
+
+            try {
+                await reader.cancel();
+            } catch (_) {}
+
+            const combined = new Uint8Array(totalRead);
+            let offset = 0;
+            for (const chunk of chunks) {
+                combined.set(chunk, offset);
+                offset += chunk.length;
+            }
+            return combined.buffer;
+        } catch (error) {
+            console.error('Error fetching file header:', error);
+            return null;
+        }
+    }
+
+    /**
      * 发送文本消息
      * @param {string} chatId - 聊天ID
      * @param {string} text - 消息文本

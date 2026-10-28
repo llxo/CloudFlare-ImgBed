@@ -2,6 +2,82 @@ import { getDatabase } from '../utils/databaseAdapter.js';
 import { TelegramAPI } from '../utils/storage/telegramAPI.js';
 import { addFileToIndex } from '../utils/indexManager.js';
 
+/**
+ * 快速解析二进制头部图片的真实尺寸（专用于 Document 原图，零外部依赖）
+ */
+function parseImageDimensions(buffer) {
+    if (!buffer || buffer.byteLength < 8) return null;
+    try {
+        const view = new DataView(buffer);
+        const uint8 = new Uint8Array(buffer);
+
+        // PNG (89 50 4E 47)
+        if (uint8[0] === 0x89 && uint8[1] === 0x50 && uint8[2] === 0x4E && uint8[3] === 0x47) {
+            if (buffer.byteLength >= 24) {
+                return { width: view.getUint32(16, false), height: view.getUint32(20, false) };
+            }
+        }
+
+        // JPEG (FF D8 FF)
+        if (uint8[0] === 0xFF && uint8[1] === 0xD8 && uint8[2] === 0xFF) {
+            let offset = 2;
+            while (offset < buffer.byteLength - 9) {
+                if (uint8[offset] !== 0xFF) break;
+                const marker = uint8[offset + 1];
+                if (marker >= 0xC0 && marker <= 0xC3 && marker !== 0xC4) {
+                    return {
+                        height: view.getUint16(offset + 5, false),
+                        width: view.getUint16(offset + 7, false)
+                    };
+                }
+                offset += 2 + view.getUint16(offset + 2, false);
+            }
+            return null;
+        }
+
+        // GIF (GIF87a / GIF89a)
+        if (uint8[0] === 0x47 && uint8[1] === 0x49 && uint8[2] === 0x46) {
+            if (buffer.byteLength >= 10) {
+                return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+            }
+        }
+
+        // WebP (RIFF....WEBP)
+        if (uint8[0] === 0x52 && uint8[1] === 0x49 && uint8[2] === 0x46 && uint8[3] === 0x46 &&
+            uint8[8] === 0x57 && uint8[9] === 0x45 && uint8[10] === 0x42 && uint8[11] === 0x50) {
+            if (uint8[12] === 0x56 && uint8[13] === 0x50 && uint8[14] === 0x38 && uint8[15] === 0x20) {
+                if (buffer.byteLength >= 30) {
+                    return { width: view.getUint16(26, true) & 0x3FFF, height: view.getUint16(28, true) & 0x3FFF };
+                }
+            }
+            if (uint8[12] === 0x56 && uint8[13] === 0x50 && uint8[14] === 0x38 && uint8[15] === 0x4C) {
+                if (buffer.byteLength >= 25) {
+                    const bits = view.getUint32(21, true);
+                    return { width: (bits & 0x3FFF) + 1, height: ((bits >> 14) & 0x3FFF) + 1 };
+                }
+            }
+            if (uint8[12] === 0x56 && uint8[13] === 0x50 && uint8[14] === 0x38 && uint8[15] === 0x58) {
+                if (buffer.byteLength >= 30) {
+                    return {
+                        width: (uint8[24] | (uint8[25] << 8) | (uint8[26] << 16)) + 1,
+                        height: (uint8[27] | (uint8[28] << 8) | (uint8[29] << 16)) + 1
+                    };
+                }
+            }
+            return null;
+        }
+
+        // BMP (BM)
+        if (uint8[0] === 0x42 && uint8[1] === 0x4D && buffer.byteLength >= 26) {
+            return { width: view.getInt32(18, true), height: Math.abs(view.getInt32(22, true)) };
+        }
+
+        return null;
+    } catch (_) {
+        return null;
+    }
+}
+
 // ==================== 1. 内存级全局单例缓存（0ms 直取） ====================
 let cachedChannel = null;
 let cachedChannelTime = 0;
@@ -137,6 +213,7 @@ export async function handleTelegramMessage(context, update, config) {
 
     // ==================== 3. 媒体解析 (Photo / Document) ====================
     let fileId, fileUniqueId, fileSize, fileName, fileType;
+    let width = null, height = null;
 
     if (message.photo && Array.isArray(message.photo) && message.photo.length > 0) {
         const largestPhoto = message.photo[message.photo.length - 1];
@@ -145,12 +222,21 @@ export async function handleTelegramMessage(context, update, config) {
         fileSize = largestPhoto.file_size || 0;
         fileType = 'image/jpeg';
         fileName = `photo_${Date.now()}.${getQuickExtension(null, fileType)}`;
+        if (largestPhoto.width && largestPhoto.height) {
+            width = largestPhoto.width;
+            height = largestPhoto.height;
+        }
     } else if (message.document && message.document.mime_type?.startsWith('image/')) {
         fileId = message.document.file_id;
         fileUniqueId = message.document.file_unique_id;
         fileSize = message.document.file_size || 0;
         fileType = message.document.mime_type;
         fileName = message.document.file_name || `document_${Date.now()}.${getQuickExtension(null, fileType)}`;
+        // Document thumbnail 作为备用尺寸
+        if (message.document.thumbnail?.width && message.document.thumbnail?.height) {
+            width = message.document.thumbnail.width;
+            height = message.document.thumbnail.height;
+        }
     } else {
         return { success: false, reason: 'not_image' };
     }
@@ -183,6 +269,22 @@ export async function handleTelegramMessage(context, update, config) {
         return { success: false, reason: 'already_saved', existingFileId };
     }
 
+    // 若为原图文档且尚无精准尺寸，流式读取前 64KB 二进制解析真实原始宽高
+    if (message.document && fileType.startsWith('image/')) {
+        try {
+            const headerBuffer = await telegramAPI.getFileHeader(fileId, 65536);
+            if (headerBuffer) {
+                const dimensions = parseImageDimensions(headerBuffer);
+                if (dimensions && dimensions.width && dimensions.height) {
+                    width = dimensions.width;
+                    height = dimensions.height;
+                }
+            }
+        } catch (err) {
+            console.error('[TelegramBot] Failed to parse document image dimensions:', err);
+        }
+    }
+
     // ==================== 5. 极速生成 ID（纯数学计算，零查库） ====================
     const ext = getQuickExtension(fileName, fileType);
     const uniqueIndex = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -199,6 +301,7 @@ export async function handleTelegramMessage(context, update, config) {
         FileName: fileName,
         FileType: fileType,
         FileSize: (fileSize / 1024 / 1024).toFixed(2),
+        FileSizeBytes: fileSize,
         UploadIP: 'Bot',
         TimeStamp: Date.now(),
         Label: 'None',
@@ -206,6 +309,10 @@ export async function handleTelegramMessage(context, update, config) {
         Tags: [],
         MediaGroupId: mediaGroupId
     };
+    if (width && height) {
+        metadata.Width = width;
+        metadata.Height = height;
+    }
     if (channel.proxyUrl) {
         metadata.TgProxyUrl = channel.proxyUrl;
     }
@@ -332,11 +439,15 @@ export async function handleTelegramMessage(context, update, config) {
     } else {
         // 单图模式：直接秒回
         const dirDisplay = uploadDir ? `/${uploadDir}/` : '/';
+        const dimensionInfo = (metadata.Width && metadata.Height)
+            ? `📐 <b>尺寸</b>: ${metadata.Width} × ${metadata.Height}\n`
+            : '';
         await telegramAPI.sendMessage(
             chatId,
             `✅ <b>图片保存成功</b>\n\n` +
             `📁 <b>存放目录</b>: <code>${dirDisplay}</code>\n` +
             `📊 <b>大小</b>: ${metadata.FileSize} MB\n` +
+            dimensionInfo +
             `🔗 <b>文件ID</b>: <code>${fullId}</code>`,
             { parse_mode: 'HTML' }
         );
