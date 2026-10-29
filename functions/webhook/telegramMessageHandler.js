@@ -377,11 +377,21 @@ export async function handleTelegramMessage(context, update, config) {
         const existingBatchRaw = await db.get(batchKey);
 
         let isLeader = false;
+        let initialMsgId = null;
 
         if (!existingBatchRaw) {
-            // 首图：作为 Leader 建立批次状态并启动滑动防抖
+            // 首图：作为 Leader 立即建立批次状态占位，杜绝并发网络耗时导致的裂脑竞争
             isLeader = true;
-            let initialMsgId = null;
+            const initialState = {
+                messageId: null,
+                firstFileId: fullId,
+                files: [{ id: fullId, size: metadata.FileSize }],
+                lastActive: Date.now(),
+                completed: false
+            };
+            await db.put(batchKey, JSON.stringify(initialState));
+
+            // 数据库占位写入完成后，再异步发送接收提示并安全回填 messageId
             try {
                 const sendRes = await telegramAPI.sendMessage(
                     chatId,
@@ -390,17 +400,16 @@ export async function handleTelegramMessage(context, update, config) {
                 );
                 if (sendRes?.ok) {
                     initialMsgId = sendRes.result.message_id;
+                    const latestRaw = await db.get(batchKey);
+                    if (latestRaw) {
+                        try {
+                            const latestState = JSON.parse(latestRaw);
+                            latestState.messageId = initialMsgId;
+                            await db.put(batchKey, JSON.stringify(latestState));
+                        } catch (_) {}
+                    }
                 }
             } catch (_) {}
-
-            const initialState = {
-                messageId: initialMsgId,
-                firstFileId: fullId,
-                files: [{ id: fullId, size: metadata.FileSize }],
-                lastActive: Date.now(),
-                completed: false
-            };
-            await db.put(batchKey, JSON.stringify(initialState));
         } else {
             // 后续图片到达：追加图片并刷新活跃时间戳
             let state;
@@ -461,8 +470,9 @@ export async function handleTelegramMessage(context, update, config) {
                                 `📁 <b>存放目录</b>: <code>${dirDisplay}</code>\n` +
                                 `🔗 <b>首个文件</b>: <code>${currentState.firstFileId}</code>`;
 
-                            if (currentState.messageId) {
-                                await telegramAPI.editMessageText(chatId, currentState.messageId, summaryText, { parse_mode: 'HTML' });
+                            const targetMsgId = currentState.messageId || initialMsgId;
+                            if (targetMsgId) {
+                                await telegramAPI.editMessageText(chatId, targetMsgId, summaryText, { parse_mode: 'HTML' });
                             } else {
                                 await telegramAPI.sendMessage(chatId, summaryText, { parse_mode: 'HTML' });
                             }
